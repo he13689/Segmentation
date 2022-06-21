@@ -6,6 +6,7 @@ import torch.nn as nn
 from loguru import logger
 from torch.nn.init import trunc_normal_
 
+from models.attention import AttentionBlock
 from models.embedding import HybridEmbed, PatchEmbed
 from utils.loader import load_checkpoint
 from utils.relative_position import RelativePosition
@@ -57,7 +58,7 @@ class BEIT(nn.Module):
 
         # 创建attention blocks, block的数量取决于depth深度
         self.blocks = nn.ModuleList(
-            [Block(dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale, drop=drop_rate,
+            [AttentionBlock(dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale, drop=drop_rate,
                    attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, with_cp=with_cp, init_values=init_values,
                    window_size=self.patch_embed.patch_shape if use_rel_pos_bias else None) for i in range(depth)])
 

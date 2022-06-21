@@ -107,15 +107,60 @@ class Attention(nn.Module):
         return x, attn
 
 
-class Block(nn.Module):
+class MultiLayerPerceptron(nn.Module):
+    # 多层线性感知网络
+    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
+        super(MultiLayerPerceptron, self).__init__()
+
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.act = act_layer()
+        self.fc2 = nn.Linear(hidden_features, out_features)
+        self.drop = nn.Dropout(drop)
+
+    def forward(self, x):
+        y = self.fc1(x)
+        y = self.act(y)
+        y = self.fc2(y)
+        y = self.drop(y)
+        return y
+
+
+class AttentionBlock(nn.Module):
     # attention block
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0., drop_path=0.,
                  init_values=None, act_layer=nn.GELU, norm_layer=nn.LayerNorm, window_size=None, attn_head_dim=None, with_cp=False):
-        super(Block, self).__init__()
+        super(AttentionBlock, self).__init__()
         self.with_cp = with_cp
         self.norm1 = norm_layer(dim)
 
+        # this is the attention layer to compute attention
         self.attn = Attention(dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop,
                               proj_drop=drop, window_size=window_size, attn_head_dim=attn_head_dim)
 
+        # drop path 防止 过拟合
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+        # 正则化
+        self.norm2 = norm_layer(dim)
+
+        mlp_hidden_size = int(dim * mlp_ratio)
+        self.mlp = MultiLayerPerceptron(dim, mlp_hidden_size, act_layer=act_layer, drop=drop)
+
+        if init_values is not None:
+            self.gamma_1 = nn.Parameter(init_values * torch.ones((dim)), requires_grad=True)
+            self.gamma_2 = nn.Parameter(init_values * torch.ones((dim)), requires_grad=True)
+        else:
+            self.gamma_1, self.gamma_2 = None, None
+
+    def forward(self, x, H, W, rel_pos_bias=None):
+        if self.gamma_1 is None:
+            x = x + self.drop_path(self.attn(self.norm1(x), rel_pos_bias=rel_pos_bias))
+            x = x + self.drop_path(self.mlp(self.norm2(x)))
+        else:
+            x = x + self.drop_path(self.gamma_1 * self.attn(self.norm1(x), rel_pos_bias=rel_pos_bias))
+            x = x + self.drop_path(self.gamma_2 * self.mlp(self.norm2(x)))
+        return x
+
+
