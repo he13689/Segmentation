@@ -3,10 +3,11 @@ from functools import partial
 
 import torch
 import torch.nn as nn
+from torch.nn.init import trunc_normal_
 
 
 class PatchEmbed(nn.Module):
-    """ use CNN to seperate the image and make patches.    """
+    """ use CNN to seperate the image and make patches. """
 
     def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768):
         super().__init__()
@@ -23,13 +24,10 @@ class PatchEmbed(nn.Module):
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x, **kwargs):
+        # use CNN to extract patches, and then flatten
         B, C, H, W = x.shape
-        # FIXME look at relaxing size constraints
-        # assert H == self.img_size[0] and W == self.img_size[1], \
-        #     f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
         x = self.proj(x)
         Hp, Wp = x.shape[2], x.shape[3]
-
         x = x.flatten(2).transpose(1, 2)
         return x, Hp, Wp
 
@@ -47,9 +45,6 @@ class HybridEmbed(nn.Module):
         self.backbone = backbone  # this is a CNN net, which is used to extract features
         if feature_size is None:
             with torch.no_grad():
-                # FIXME this is hacky, but most reliable way of determining the exact dim of the output feature
-                # map for all networks, the feature metadata has reliable channel and stride info, but using
-                # stride to calc feature dim requires info about padding of each stage that isn't captured.
                 training = backbone.training
                 if training:
                     backbone.eval()
@@ -70,7 +65,7 @@ class HybridEmbed(nn.Module):
         return x
 
 
-class RelativePositionBias(nn.Module):
+class RelativePosition(nn.Module):
     # 相对位置偏置，用于表示seq序列的位置信息
     def __init__(self, window_size, num_heads):
         super().__init__()
@@ -130,21 +125,22 @@ class BEIT(nn.Module):
                  use_shared_rel_pos_bias=False, pretrained=None, with_cp=False):
         super(BEIT, self).__init__()
 
+        # 定义正则化层
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
         self.norm_layer = norm_layer
 
         self.num_classes = num_classes  # 类别
         self.num_features = self.embed_dim = embed_dim  # 特征数等于编码维度
-        self.drop_path_rate = drop_path_rate
+        self.drop_path_rate = drop_path_rate  # drop path 几率
 
-        # 2种不同的patch embed的方式
+        # 2种不同的patch embed的方式， 选择一种对输入进行patch
         if hybrid_backbone is not None:
             self.patch_embed = HybridEmbed(hybrid_backbone, img_size=img_size, in_chans=in_chans, embed_dim=embed_dim)
         else:
             self.patch_embed = PatchEmbed(img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
         num_patches = self.patch_embed.num_patches
 
-        # 分类token 是一个parameter 可训练  作用见Q&As  将 cls 作为序列的第一个元素
+        # 分类token 是一个parameter 可训练  作用见Q&As  将 cls 作为序列的第一个元素，随输入向量传入网络
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
 
         if use_abs_pos_emb:  # 是否使用绝对位置编码
@@ -152,22 +148,31 @@ class BEIT(nn.Module):
         else:
             self.pos_embed = None
 
+        # 使用相对位置编码
         if use_rel_pos_bias:
-            self.rel_pos_bias = RelativePositionBias(window_size=self.patch_embed.patch_shape, num_heads=num_heads)
+            self.rel_pos_bias = RelativePosition(window_size=self.patch_embed.patch_shape, num_heads=num_heads)
         else:
             self.rel_pos_bias = None
 
         # 位置dropout
         self.pos_drop = nn.Dropout(p=drop_rate)
-        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # 根据随机深度衰减而计算dropout rate
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # 根据随机深度衰减而计算dropout path rate
 
         # 是否使用相对位置bias
         self.use_rel_pos_bias = use_rel_pos_bias
 
+        # 这个是 backbone vit 的blocks，是一个个的transform块
         self.blocks = nn.ModuleList(
             [Block(dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale, drop=drop_rate,
                    attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, with_cp=with_cp, init_values=init_values,
                    window_size=self.patch_embed.patch_shape if use_rel_pos_bias else None) for i in range(depth)])
+
+        trunc_normal_(self.cls_token, std=.02)
+        self.init_weights(pretrained)
+
+    def init_weights(self, pretrained=None):
+        if isinstance(pretrained, str):
+            load_checkpoint(self, pretrained, strict=False)
 
 
 # 基于 微软BEiT的网络
