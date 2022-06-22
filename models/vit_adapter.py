@@ -68,7 +68,35 @@ class Model(BEIT):
         # interaction part
         out = list()
         for i, layer in enumerate(self.interactions):
-            indexes = self.interaction_indexes[i]
+            indexes = self.interaction_indexes[i]  # indexes记录了那些block对应哪个interaction
+            # self.blocks[indexes[0]:indexes[-1] + 1] 取出对应的block
+            x, c, cls = layer(x, c, cls, self.blocks[indexes[0]:indexes[-1] + 1], x1, x2, H, W)
+            out.append(x.transpose(1, 2).view(bs, dim, H, W).contiguous())
+
+        # split and reshape
+        c2 = c[:, 0:c2.size(1), :]
+        c3 = c[:, c2.size(1):c2.size(1) + c3.size(1), :]
+        c4 = c[:, c2.size(1) + c3.size(1):, :]
+
+        c2 = c2.transpose(1, 2).view(bs, dim, H * 2, W * 2).contiguous()
+        c3 = c3.transpose(1, 2).view(bs, dim, H, W).contiguous()
+        c4 = c4.transpose(1, 2).view(bs, dim, H // 2, W // 2).contiguous()
+        c1 = self.up(c2) + c1
+
+        if self.add_vit_feature:
+            x1, x2, x3, x4 = out
+            x1 = F.interpolate(x1, scale_factor=4, mode='bilinear', align_corners=False)
+            x2 = F.interpolate(x2, scale_factor=2, mode='bilinear', align_corners=False)
+            x4 = F.interpolate(x4, scale_factor=0.5, mode='bilinear', align_corners=False)
+            c1, c2, c3, c4 = c1 + x1, c2 + x2, c3 + x3, c4 + x4
+
+        # Final Norm
+        f1 = self.norm1(c1)
+        f2 = self.norm2(c2)
+        f3 = self.norm3(c3)
+        f4 = self.norm4(c4)
+        return [f1, f2, f3, f4]
+
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
