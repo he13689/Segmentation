@@ -1,13 +1,14 @@
-import math
-
-import torch
+# use the config of upernet_beit_adapter_large_480_80k_pascal_context_59_ss
+import torch, warnings, math
 from torch import nn
 from torch.nn.init import normal_, trunc_normal_
-
+import torch.nn.functional as F
 from models.adapter import SpatialPriorModule, InteractionBlock
 from models.attention import MSDeformAttn
 from models.vit import BEIT
 from utils.commons import deform
+
+warnings.filterwarnings('ignore')
 
 
 class Model(BEIT):
@@ -21,6 +22,8 @@ class Model(BEIT):
         self.flags = [i for i in range(-1, self.num_blocks, self.num_blocks // 4)][1:]
 
         embed_dim = self.embed_dim  # =feature dim
+
+        # 层级编码 3 1024  这个编码会被加到spm的输出上
         self.level_embed = nn.Parameter(torch.zeros(3, embed_dim))
 
         self.spm = SpatialPriorModule(conv_inplane, embed_dim)
@@ -31,10 +34,10 @@ class Model(BEIT):
                              extra_extractor=True if i == len(interaction_indexes) - 1 else False) for i in range(len(interaction_indexes))])
 
         self.up = nn.ConvTranspose2d(embed_dim, embed_dim, 2, 2)  # 放大2倍
-        self.norm1 = nn.SyncBatchNorm(embed_dim)
-        self.norm2 = nn.SyncBatchNorm(embed_dim)
-        self.norm3 = nn.SyncBatchNorm(embed_dim)
-        self.norm4 = nn.SyncBatchNorm(embed_dim)
+        self.norm1 = nn.BatchNorm2d(embed_dim)
+        self.norm2 = nn.BatchNorm2d(embed_dim)
+        self.norm3 = nn.BatchNorm2d(embed_dim)
+        self.norm4 = nn.BatchNorm2d(embed_dim)
 
         self.up.apply(self._init_weights)
         self.spm.apply(self._init_weights)
@@ -43,9 +46,29 @@ class Model(BEIT):
         normal_(self.level_embed)
 
     def forward(self, x):
+        # deform x to x1 and x2
         x1, x2 = deform(x)
 
+        # spatial prior module
+        # c1 : 16 1024 120 120  c2 : 16 3600 1024  c3 : 16 900 1024  c4 : 16 225 1024
         c1, c2, c3, c4 = self.spm(x)
+        c2, c3, c4 = self._add_level_embed(c2, c3, c4)  # add level embedding to the output of spm
+        c = torch.cat([c2, c3, c4], dim=1)  # 16 4725 1024  this is the concat
+
+        x, H, W = self.patch_embed(x)
+        bs, n, dim = x.shape
+        cls = self.cls_token.expand(bs, -1, -1)  # create class token for each batch
+
+        if self.pos_embed is not None:
+            pos_emb = self._get_pos_embed(self.pos_embed, H, W)
+            x += pos_emb
+
+        x = self.pos_drop(x)
+
+        # interaction part
+        out = list()
+        for i, layer in enumerate(self.interactions):
+            indexes = self.interaction_indexes[i]
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -66,6 +89,13 @@ class Model(BEIT):
         if isinstance(m, MSDeformAttn):
             m._reset_parameters()
 
+    def _get_pos_embed(self, pos_embed, H, W):
+        pos_embed = pos_embed.reshape(
+            1, self.pretrain_size[0] // 16, self.pretrain_size[1] // 16, -1).permute(0, 3, 1, 2)
+        pos_embed = F.interpolate(pos_embed, size=(H, W), mode='bicubic', align_corners=False). \
+            reshape(1, -1, H * W).permute(0, 2, 1)
+        return pos_embed
+
     def _add_level_embed(self, c2, c3, c4):
         c2 = c2 + self.level_embed[0]
         c3 = c3 + self.level_embed[1]
@@ -74,4 +104,9 @@ class Model(BEIT):
 
 
 if __name__ == '__main__':
-    model = Model()
+    model = Model(img_size=480, patch_size=16, embed_dim=1024, depth=24, num_heads=16, mlp_ratio=4, qkv_bias=True,
+                  use_abs_pos_emb=False, use_rel_pos_bias=True, init_values=1e-6, drop_path_rate=0.3, conv_inplane=64,
+                  n_points=4, deform_num_heads=16, cffn_ratio=0.25, deform_ratio=0.5, interaction_indexes=[[0, 5], [6, 11], [12, 17], [18, 23]])
+
+    fake_image = torch.rand(16, 3, 480, 480)
+    result = model(fake_image)

@@ -14,19 +14,19 @@ class SpatialPriorModule(nn.Module):
 
         # stem part, to extract features from image
         self.stem = nn.Sequential(
-            nn.Conv2d(3, inplanes, 3, 2, 1, bias=False), nn.SyncBatchNorm(inplanes), nn.ReLU(inplace=True),
-            nn.Conv2d(inplanes, inplanes, 3, 1, 1, bias=False), nn.SyncBatchNorm(inplanes), nn.ReLU(inplace=True),
-            nn.Conv2d(inplanes, inplanes, 3, 1, 1, bias=False), nn.SyncBatchNorm(inplanes), nn.ReLU(inplace=True),
+            nn.Conv2d(3, inplanes, 3, 2, 1, bias=False), nn.BatchNorm2d(inplanes), nn.ReLU(inplace=True),
+            nn.Conv2d(inplanes, inplanes, 3, 1, 1, bias=False), nn.BatchNorm2d(inplanes), nn.ReLU(inplace=True),
+            nn.Conv2d(inplanes, inplanes, 3, 1, 1, bias=False), nn.BatchNorm2d(inplanes), nn.ReLU(inplace=True),
             nn.MaxPool2d(3, 2, 1))
 
         # F1 part
-        self.conv2 = nn.Sequential(nn.Conv2d(inplanes, inplanes * 2, 3, 2, 1, bias=False), nn.SyncBatchNorm(inplanes * 2), nn.ReLU(inplace=True))
+        self.conv2 = nn.Sequential(nn.Conv2d(inplanes, inplanes * 2, 3, 2, 1, bias=False), nn.BatchNorm2d(inplanes * 2), nn.ReLU(inplace=True))
 
         # F2 part
-        self.conv3 = nn.Sequential(nn.Conv2d(inplanes * 2, inplanes * 4, 3, 2, 1, bias=False), nn.SyncBatchNorm(inplanes * 4), nn.ReLU(inplace=True))
+        self.conv3 = nn.Sequential(nn.Conv2d(inplanes * 2, inplanes * 4, 3, 2, 1, bias=False), nn.BatchNorm2d(inplanes * 4), nn.ReLU(inplace=True))
 
         # F3 part
-        self.conv4 = nn.Sequential(nn.Conv2d(inplanes * 4, inplanes * 4, 3, 2, 1, bias=False), nn.SyncBatchNorm(inplanes * 4), nn.ReLU(inplace=True))
+        self.conv4 = nn.Sequential(nn.Conv2d(inplanes * 4, inplanes * 4, 3, 2, 1, bias=False), nn.BatchNorm2d(inplanes * 4), nn.ReLU(inplace=True))
 
         # final conv
         self.fc1 = nn.Conv2d(inplanes, embed_dim, 1, 1, 0, bias=True)
@@ -35,17 +35,20 @@ class SpatialPriorModule(nn.Module):
         self.fc4 = nn.Conv2d(inplanes * 4, embed_dim, 1, 1, 0, bias=True)
 
     def forward(self, x):
+        # spm stem
         x = self.stem(x)
-        y2 = self.conv2(x)
-        y3 = self.conv2(y2)
-        y4 = self.conv2(y3)
-
         y1 = self.fc1(x)
-        y2 = self.fc2(y2)
-        y3 = self.fc2(y3)
-        y4 = self.fc2(y4)
 
-        bs, dim, _, _ = x.shape
+        # three F layer
+        y2 = self.conv2(x)  # F1
+        y3 = self.conv3(y2)  # F2
+        y4 = self.conv4(y3)  # F3
+        y2 = self.fc2(y2)
+        y3 = self.fc3(y3)
+        y4 = self.fc4(y4)
+
+        # flatten in spm
+        bs, dim, _, _ = y1.shape
         y2 = y2.view(bs, dim, -1).transpose(1, 2)
         y3 = y3.view(bs, dim, -1).transpose(1, 2)
         y4 = y4.view(bs, dim, -1).transpose(1, 2)
@@ -140,7 +143,7 @@ class Extractor(nn.Module):
         return query
 
 
-class InteractionBlock:
+class InteractionBlock(nn.Module):
     def __init__(self, dim, num_heads=6, n_points=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), drop=0., drop_path=0., with_cffn=True, cffn_ratio=0.25, init_values=0., deform_ratio=1.0, extra_extractor=False):
         super(InteractionBlock, self).__init__()
 
